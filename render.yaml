@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: algovision-backend
+    rootDir: backend
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements-dev.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DEV_MODE
+        value: "true"
+      - key: PAPER_TRADE_MODE
+        value: "true"
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: CORS_ORIGINS
+        value: '["https://algovision-pro.vercel.app","http://localhost:5173"]'
