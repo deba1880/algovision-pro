@@ -63,24 +63,45 @@ class NSEScraper:
 
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
-        self._cookies: dict = {}
+        self._options_warmed: bool = False
+
+    async def _reset_session(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
+        self._options_warmed = False
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 headers=NSE_HEADERS,
-                timeout=15.0,
+                timeout=20.0,
                 follow_redirects=True,
                 http2=False,
             )
-            # Warm up session — NSE requires a homepage hit first to set cookies
+            self._options_warmed = False
+            # Homepage hit — sets nsit / nseappid cookies
             try:
-                r = await self._client.get(NSE_BASE)
-                self._cookies = dict(r.cookies)
-                await asyncio.sleep(0.5)
+                await self._client.get(NSE_BASE)
+                await asyncio.sleep(0.8)
             except Exception as e:
-                logger.warning("NSE session warmup failed: %s", e)
+                logger.warning("NSE homepage warmup failed: %s", e)
         return self._client
+
+    async def _warmup_options_session(self):
+        """NSE requires visiting the F&O page before the options-chain API works."""
+        if self._options_warmed:
+            return
+        client = await self._get_client()
+        try:
+            await client.get(
+                f"{NSE_BASE}/market-data/equity-derivatives-watch",
+                headers={**NSE_HEADERS, "Referer": NSE_BASE + "/"},
+            )
+            await asyncio.sleep(1.0)
+            self._options_warmed = True
+        except Exception as e:
+            logger.warning("NSE options session warmup failed: %s", e)
 
     async def _get(self, endpoint: str) -> Optional[dict]:
         """Rate-limited GET against NSE API."""
@@ -93,22 +114,18 @@ class NSEScraper:
         try:
             resp = await client.get(
                 f"{NSE_API}{endpoint}",
-                cookies=self._cookies,
-                headers={**NSE_HEADERS, "Accept-Encoding": "gzip, deflate"},
+                headers={**NSE_HEADERS, "Referer": f"{NSE_BASE}/"},
             )
             _last_request_time = time.monotonic()
             if resp.status_code == 200:
                 try:
                     return resp.json()
                 except Exception:
-                    # Try decoding as text if JSON parse fails
                     import json
                     return json.loads(resp.text)
             elif resp.status_code in (401, 403):
                 # Session expired — force re-init on next call
-                await self._client.aclose()
-                self._client = None
-                self._cookies = {}
+                await self._reset_session()
             logger.warning("NSE API returned %s for %s", resp.status_code, endpoint)
             return None
         except Exception as e:
@@ -121,14 +138,25 @@ class NSEScraper:
         """
         Fetch full options chain for index or stock.
         symbol: NIFTY, BANKNIFTY, FINNIFTY, or stock symbol
+        Retries once with a fresh session if the first attempt fails.
         """
         endpoint = f"/option-chain-indices?symbol={symbol}" \
                    if symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY") \
                    else f"/option-chain-equities?symbol={symbol}"
-        data = await self._get(endpoint)
-        if not data:
-            return None
-        return self._parse_options_chain(data, symbol)
+
+        for attempt in range(2):
+            if attempt > 0:
+                logger.info("Retrying options chain for %s (resetting session)", symbol)
+                await self._reset_session()
+                await asyncio.sleep(2.0)
+
+            await self._warmup_options_session()
+            data = await self._get(endpoint)
+            if data:
+                return self._parse_options_chain(data, symbol)
+
+        logger.warning("Options chain fetch failed for %s after 2 attempts", symbol)
+        return None
 
     def _parse_options_chain(self, raw: dict, symbol: str) -> dict:
         """Normalize NSE options chain response."""

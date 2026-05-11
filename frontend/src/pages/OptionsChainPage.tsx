@@ -27,11 +27,8 @@ export default function OptionsChainPage() {
       setData(res)
       if (res.expiry_dates?.length && !expiry) setExpiry(res.expiry_dates[0])
     } catch (e: any) {
-      if (e?.response?.status === 503) {
-        setError('Options chain requires Indian network access. NSE India blocks requests from non-Indian IPs. This feature works when the backend is hosted in India.')
-      } else {
-        setError(e?.response?.data?.detail || e?.message || 'Failed to load options chain')
-      }
+      const detail: string = e?.response?.data?.detail || e?.message || 'Failed to load options chain'
+      setError(detail)
     } finally { setLoading(false) }
   }
 

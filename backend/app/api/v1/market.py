@@ -178,10 +178,19 @@ async def get_options_chain(symbol: str, redis=Depends(get_redis)):
     try:
         data = await _scraper.get_options_chain(symbol.upper())
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Options chain fetch failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Options chain fetch failed: {e}. NSE may be blocking non-Indian IPs.",
+        )
 
     if not data:
-        raise HTTPException(status_code=503, detail="Options chain unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Options chain unavailable. NSE India blocks non-Indian IPs. "
+                "This feature works when the backend is hosted in India or run locally."
+            ),
+        )
 
     await redis.setex(cache_key, 60, json.dumps(data))
     return {"source": "live", "data": data}
