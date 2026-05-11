@@ -13,8 +13,10 @@ export default function Layout() {
       <TopBar />
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Left sidebar — watchlist */}
-        <Sidebar />
+        {/* Left sidebar — watchlist (hidden on mobile) */}
+        <div className="hidden md:block shrink-0">
+          <Sidebar />
+        </div>
 
         {/* Main content area */}
         <main className="flex-1 overflow-auto">

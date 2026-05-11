@@ -227,7 +227,7 @@ export default function DashboardPage() {
     <div className="p-4 space-y-4 h-full overflow-auto">
 
       {/* ── Page Header ──────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-base font-bold text-white">Market Dashboard</h1>
           <p className="text-[10px] text-[#8b949e] mt-0.5">
@@ -268,13 +268,13 @@ export default function DashboardPage() {
 
       {/* ── Index Cards ─────────────────────────────────────────────── */}
       {indices.length > 0 ? (
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {indices.slice(0, 4).map(idx => (
             <IndexCard key={idx.name} {...idx} />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {['NIFTY 50', 'BANK NIFTY', 'FIN NIFTY', 'SENSEX'].map(n => (
             <div key={n} className={clsx('panel p-3', loading && 'animate-pulse')}>
               <div className="text-[10px] text-[#8b949e] mb-2">{n}</div>
@@ -288,10 +288,10 @@ export default function DashboardPage() {
       )}
 
       {/* ── Main Grid ──────────────────────────────────────────────── */}
-      <div className="grid grid-cols-12 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
 
         {/* AI Signals — 5 cols */}
-        <div className="col-span-5 panel p-3">
+        <div className="col-span-1 md:col-span-5 panel p-3">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <Zap size={13} className="text-yellow-400" />
@@ -320,7 +320,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Middle — breadth + FII/DII + portfolio — 4 cols */}
-        <div className="col-span-4 space-y-3">
+        <div className="col-span-1 md:col-span-4 space-y-3">
 
           {/* Market Breadth */}
           <div className="panel p-3">
@@ -413,7 +413,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Right — events + quick links — 3 cols */}
-        <div className="col-span-3 space-y-3">
+        <div className="col-span-1 md:col-span-3 space-y-3">
 
           {/* Upcoming Events */}
           <div className="panel p-3">

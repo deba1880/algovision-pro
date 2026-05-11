@@ -7,10 +7,11 @@ export default function MarketTicker() {
   if (!indices.length) return null
 
   const items = [...indices, ...indices] // duplicate for seamless scroll
+  const duration = Math.max(indices.length * 4, 20)
 
   return (
     <div className="bg-[#0d1117] border-b border-[#30363d] overflow-hidden h-7 flex items-center">
-      <div className="animate-ticker flex gap-8 whitespace-nowrap px-4">
+      <div className="animate-ticker flex gap-8 whitespace-nowrap px-4" style={{ animationDuration: `${duration}s` }}>
         {items.map((idx, i) => {
           const positive = idx.change_pct >= 0
           return (

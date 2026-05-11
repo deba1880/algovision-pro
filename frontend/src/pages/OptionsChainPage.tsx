@@ -17,15 +17,22 @@ export default function OptionsChainPage() {
   const [data, setData] = useState<any>(null)
   const [expiry, setExpiry] = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const fetchChain = async () => {
     setLoading(true)
+    setError(null)
     try {
       const res = await api.getOptionsChain(symbol)
       setData(res)
       if (res.expiry_dates?.length && !expiry) setExpiry(res.expiry_dates[0])
-    } catch { }
-    finally { setLoading(false) }
+    } catch (e: any) {
+      if (e?.response?.status === 503) {
+        setError('Options chain requires Indian network access. NSE India blocks requests from non-Indian IPs. This feature works when the backend is hosted in India.')
+      } else {
+        setError(e?.response?.data?.detail || e?.message || 'Failed to load options chain')
+      }
+    } finally { setLoading(false) }
   }
 
   useEffect(() => { fetchChain() }, [symbol])
@@ -41,7 +48,7 @@ export default function OptionsChainPage() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-4 px-4 py-2 bg-[#161b22] border-b border-[#30363d]">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-[#161b22] border-b border-[#30363d]">
         {/* Symbol tabs */}
         <div className="flex gap-1">
           {INDICES.map(s => (
@@ -68,7 +75,7 @@ export default function OptionsChainPage() {
         )}
 
         {/* Stats */}
-        <div className="flex items-center gap-4 ml-auto text-xs">
+        <div className="flex flex-wrap items-center gap-3 ml-auto text-xs">
           <Stat label="Spot" value={underlying.toFixed(2)} />
           <Stat label="Max Pain" value={maxPain.toFixed(0)} color="text-yellow-400" />
           <Stat label="PCR" value={pcr.toFixed(3)} color={pcr < 0.9 ? 'text-green-400' : pcr > 1.2 ? 'text-red-400' : 'text-white'} />
@@ -81,8 +88,19 @@ export default function OptionsChainPage() {
         </button>
       </div>
 
+      {/* Error / empty state */}
+      {error && (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center p-8 max-w-sm">
+            <div className="text-3xl mb-3">🌐</div>
+            <p className="text-sm font-semibold text-red-400 mb-2">Data Unavailable</p>
+            <p className="text-xs text-[#8b949e]">{error}</p>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
-      <div className="flex-1 overflow-auto">
+      {!error && <div className="flex-1 overflow-auto">
         <table className="w-full text-xs">
           <thead className="sticky top-0 bg-[#161b22] border-b border-[#30363d] z-10">
             <tr>
@@ -154,7 +172,7 @@ export default function OptionsChainPage() {
             })}
           </tbody>
         </table>
-      </div>
+      </div>}
     </div>
   )
 }

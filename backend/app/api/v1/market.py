@@ -55,6 +55,51 @@ async def get_quote(
 
 # ─── Historical Candles ────────────────────────────────────────────────────────
 
+_YF_TF_MAP = {
+    "1m": ("1m", "7d"),   "3m": ("2m", "7d"),  "5m": ("5m", "60d"),
+    "15m": ("15m", "60d"), "30m": ("30m", "60d"), "1h": ("60m", "730d"),
+    "4h": ("1d", "5y"),   "1d": ("1d", "5y"),
+}
+_YF_INDEX_MAP = {
+    "NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "SENSEX": "^BSESN",
+    "FINNIFTY": "NIFTY_FIN_SERVICE.NS", "MIDCPNIFTY": "NIFTY_MIDCAP_50.NS",
+}
+
+
+async def _fetch_candles_yfinance(symbol: str, exchange: str, timeframe: str, limit: int) -> list:
+    import asyncio
+    import yfinance as yf
+
+    yf_interval, period = _YF_TF_MAP.get(timeframe, ("15m", "60d"))
+    sym = symbol.upper()
+    suffix = ".NS" if exchange.upper() in ("NSE", "NFO") else ".BO" if exchange.upper() in ("BSE", "BFO") else ""
+    ticker = _YF_INDEX_MAP.get(sym, f"{sym}{suffix}")
+
+    def _download():
+        return yf.Ticker(ticker).history(period=period, interval=yf_interval, auto_adjust=True)
+
+    loop = asyncio.get_event_loop()
+    try:
+        df = await loop.run_in_executor(None, _download)
+        if df is None or df.empty:
+            return []
+        candles = []
+        for ts, row in df.tail(limit).iterrows():
+            candles.append({
+                "time": int(ts.timestamp()),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": int(row.get("Volume", 0)),
+                "oi": 0,
+            })
+        return candles
+    except Exception as e:
+        logger.warning("yfinance fallback failed for %s: %s", ticker, e)
+        return []
+
+
 @router.get("/candles/{symbol}")
 async def get_candles(
     symbol: str,
@@ -114,6 +159,10 @@ async def get_candles(
         for row in reversed(rows)
         if row[2] and row[5]  # skip rows with no open/close
     ]
+
+    if not candles:
+        candles = await _fetch_candles_yfinance(symbol, exchange, timeframe, limit)
+
     return {"symbol": symbol, "exchange": exchange, "timeframe": timeframe, "candles": candles}
 
 
