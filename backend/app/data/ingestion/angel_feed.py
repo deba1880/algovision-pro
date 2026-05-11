@@ -13,9 +13,15 @@ Data provided: LTP, OHLCV, OI, Bid/Ask for all NSE/BSE/MCX instruments.
 import asyncio
 import json
 import logging
-import pyotp
 from typing import Callable, Dict, List, Optional
 from datetime import datetime, date
+
+try:
+    import pyotp
+    _HAS_PYOTP = True
+except ImportError:
+    pyotp = None
+    _HAS_PYOTP = False
 
 try:
     from SmartApi import SmartConnect
@@ -78,7 +84,7 @@ class AngelOneFeed:
             return False
 
         try:
-            totp = pyotp.TOTP(settings.ANGEL_TOTP_SECRET).now()
+            totp = pyotp.TOTP(settings.ANGEL_TOTP_SECRET).now() if pyotp else "000000"
             self._smart = SmartConnect(api_key=settings.ANGEL_API_KEY)
             data = self._smart.generateSession(
                 settings.ANGEL_CLIENT_ID,
@@ -100,7 +106,7 @@ class AngelOneFeed:
     def refresh_session(self) -> bool:
         """Refresh JWT token (tokens expire daily — call before market open)."""
         try:
-            totp = pyotp.TOTP(settings.ANGEL_TOTP_SECRET).now()
+            totp = pyotp.TOTP(settings.ANGEL_TOTP_SECRET).now() if pyotp else "000000"
             data = self._smart.generateSession(
                 settings.ANGEL_CLIENT_ID,
                 settings.ANGEL_PASSWORD,
