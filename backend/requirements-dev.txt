@@ -1,0 +1,35 @@
+# Minimal requirements for DEV_MODE (SQLite, no Docker/PostgreSQL/Redis needed)
+# Install with: pip install -r requirements-dev.txt
+
+# ─── Web Framework ─────────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# ─── Database (SQLite only) ────────────────────────────────────────────────────
+sqlalchemy[asyncio]==2.0.36
+aiosqlite==0.20.0
+alembic==1.14.0
+
+# ─── Market Data ───────────────────────────────────────────────────────────────
+yfinance==0.2.50
+nsepython==1.4
+httpx==0.28.0
+requests==2.32.3
+
+# ─── Technical Analysis ────────────────────────────────────────────────────────
+pandas==2.2.3
+numpy==1.26.4
+pandas-ta==0.3.14b
+
+# ─── Alerts (optional — gracefully disabled if not installed) ─────────────────
+python-telegram-bot==21.9
+aiosmtplib==3.0.2
+
+# ─── Utilities ─────────────────────────────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+structlog==24.4.0
+pytz==2024.2
+httpx[http2]==0.28.0

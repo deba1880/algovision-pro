@@ -1,0 +1,145 @@
+version: "3.9"
+
+services:
+  # ─── PostgreSQL + TimescaleDB ───────────────────────────────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: algotrade_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: algotrade
+      POSTGRES_USER: algotrade
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-algotrade_secret}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./backend/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U algotrade -d algotrade"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: algotrade_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ─── Apache Kafka + Zookeeper ────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: algotrade_zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zkdata:/var/lib/zookeeper/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: algotrade_kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 24
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: kafka-topics --bootstrap-server localhost:9092 --list
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ─── Backend API ─────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: algotrade_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - model_data:/app/ai/ml/models
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ─── Celery Worker ────────────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: algotrade_celery
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - db
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4
+
+  # ─── Frontend ─────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: algotrade_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: pnpm dev --host 0.0.0.0
+
+  # ─── Nginx ────────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: algotrade_nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+    volumes:
+      - ./infrastructure/nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  pgdata:
+  redisdata:
+  zkdata:
+  kafkadata:
+  model_data:
