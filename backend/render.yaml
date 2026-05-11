@@ -16,4 +16,4 @@ services:
       - key: LOG_LEVEL
         value: "INFO"
       - key: CORS_ORIGINS
-        value: '["https://algovision-pro.vercel.app","http://localhost:5173"]'
+        value: '["https://algovision-pro-eaimart.vercel.app","http://localhost:5173"]'
