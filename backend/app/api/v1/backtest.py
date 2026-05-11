@@ -8,10 +8,17 @@ Strategy: Break-of-Structure (BOS) + pullback entry
   - Entry: bias candle after pullback (RSI 30–55 for bull, 45–70 for bear)
             + candle direction confirmation + price above/below EMA20
   - Entry at open of next bar; SL = entry ± ATR × multiplier; TP = entry ± SL-distance × RR
+
+Segments:
+  SPOT       — trade the underlying index/equity directly
+  FUTURES    — same signals, lot-size position sizing (NIFTY=25, BANKNIFTY=15, …)
+  OPTIONS_CE — bullish BUY signals only; buy ATM call, P&L via Black-Scholes
+  OPTIONS_PE — bearish SELL signals only; buy ATM put, P&L via Black-Scholes
 """
 
 import asyncio
 import logging
+import math
 
 import numpy as np
 import pandas as pd
@@ -34,16 +41,30 @@ _YF_INTERVAL = {
 }
 _INTRADAY = {"5m", "15m", "30m", "1h"}
 
+_LOT_SIZES = {
+    "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75, "SENSEX": 20,
+}
+_STRIKE_GAPS = {
+    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25, "SENSEX": 100,
+}
+# Approximate bars-per-day for theta decay
+_BARS_PER_DAY = {
+    "5m": 75, "15m": 25, "30m": 12, "1h": 6, "1d": 1, "1w": 0.2,
+}
+
 
 class BacktestConfig(BaseModel):
     symbol: str = "NIFTY"
-    timeframe: str = "15m"
+    timeframe: str = "1d"
     from_date: str = "2024-01-01"
     to_date: str = "2024-12-31"
     initial_capital: float = Field(100_000, ge=10_000)
     risk_per_trade_pct: float = Field(1.0, ge=0.1, le=5.0)
     sl_atr_mult: float = Field(1.5, ge=0.5, le=5.0)
     tp_rr: float = Field(2.0, ge=1.0, le=10.0)
+    segment: str = "SPOT"           # SPOT | FUTURES | OPTIONS_CE | OPTIONS_PE
+    assumed_iv_pct: float = Field(15.0, ge=5.0, le=80.0)
+    option_dte: int = Field(15, ge=1, le=90)
 
 
 @router.post("/run")
@@ -68,7 +89,6 @@ async def run_backtest(config: BacktestConfig):
         hint = " Note: intraday data (≤1h) is limited to last 60 days." if config.timeframe in _INTRADAY else ""
         raise HTTPException(404, f"Insufficient data for {config.symbol}/{config.timeframe}.{hint}")
 
-    # Flatten multi-level columns (multi-ticker download returns MultiIndex)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
 
@@ -78,38 +98,58 @@ async def run_backtest(config: BacktestConfig):
     return _run(df, config, ts_fmt)
 
 
+# ─── Black-Scholes helpers ─────────────────────────────────────────────────────
+
+def _norm_cdf(x: float) -> float:
+    a = abs(x)
+    t = 1.0 / (1.0 + 0.2316419 * a)
+    poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+    p = 1.0 - (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * a * a) * poly
+    return p if x >= 0.0 else 1.0 - p
+
+
+def _bs_call(S: float, K: float, T: float, sigma: float) -> float:
+    if T <= 0:
+        return max(S - K, 0.0)
+    d1 = (math.log(S / K) + 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return S * _norm_cdf(d1) - K * _norm_cdf(d2)
+
+
+def _bs_put(S: float, K: float, T: float, sigma: float) -> float:
+    if T <= 0:
+        return max(K - S, 0.0)
+    d1 = (math.log(S / K) + 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return K * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+
 # ─── Indicator Computation ─────────────────────────────────────────────────────
 
 def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    # ATR (Wilder smoothing via simple rolling for speed)
     hl = df["High"] - df["Low"]
     hc = (df["High"] - df["Close"].shift()).abs()
     lc = (df["Low"] - df["Close"].shift()).abs()
     df["atr"] = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
 
-    # RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean()
     df["rsi"] = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
 
-    # EMA20 for trend filter
     df["ema20"] = df["Close"].ewm(span=20).mean()
 
-    # Rolling swing high/low (look-back only — shift(1) prevents lookahead)
     df["swing_high"] = df["High"].rolling(20).max().shift(1)
-    df["swing_low"] = df["Low"].rolling(20).min().shift(1)
+    df["swing_low"]  = df["Low"].rolling(20).min().shift(1)
     return df
 
 
 # ─── Signal Detection ──────────────────────────────────────────────────────────
 
 def _add_signals(df: pd.DataFrame) -> pd.DataFrame:
-    # Break of Structure
     bos_bull = (df["Close"] > df["swing_high"]) & (df["Close"].shift(1) <= df["swing_high"].shift(1))
-    bos_bear = (df["Close"] < df["swing_low"]) & (df["Close"].shift(1) >= df["swing_low"].shift(1))
+    bos_bear = (df["Close"] < df["swing_low"])  & (df["Close"].shift(1) >= df["swing_low"].shift(1))
 
-    # Track rolling market bias
     bias = np.zeros(len(df), dtype=np.int8)
     cur = 0
     for i, (b, s) in enumerate(zip(bos_bull, bos_bear)):
@@ -151,11 +191,18 @@ def _simulate(df: pd.DataFrame, cfg: BacktestConfig, ts_fmt: str) -> dict:
     sig   = df["signal"].values
     ts    = df.index.strftime(ts_fmt).tolist()
 
-    n          = len(df)
-    equity     = cfg.initial_capital
-    risk_frac  = cfg.risk_per_trade_pct / 100
-    sl_mult    = cfg.sl_atr_mult
-    rr         = cfg.tp_rr
+    n         = len(df)
+    equity    = cfg.initial_capital
+    risk_frac = cfg.risk_per_trade_pct / 100
+    sl_mult   = cfg.sl_atr_mult
+    rr        = cfg.tp_rr
+    segment   = cfg.segment.upper()
+
+    sym       = cfg.symbol.upper()
+    lot_size  = _LOT_SIZES.get(sym, 1)
+    strike_gap = _STRIKE_GAPS.get(sym, 10)
+    sigma     = cfg.assumed_iv_pct / 100.0
+    bars_per_day = _BARS_PER_DAY.get(cfg.timeframe, 1)
 
     trades: list[dict] = []
     equity_curve: list[list] = []
@@ -165,16 +212,20 @@ def _simulate(df: pd.DataFrame, cfg: BacktestConfig, ts_fmt: str) -> dict:
         equity_curve.append([ts[i], round(equity, 2)])
 
         if trade is None:
-            # Look for entry signal; need room for at least one exit bar
             if np.isnan(atr[i]) or sig[i] == 0 or i + 1 >= n:
+                continue
+            # OPTIONS_CE only acts on bullish signals; OPTIONS_PE only on bearish
+            if segment == "OPTIONS_CE" and sig[i] != 1:
+                continue
+            if segment == "OPTIONS_PE" and sig[i] != -1:
                 continue
 
             entry = float(opens[i + 1])
-            if sig[i] == 1:   # BUY
+            if sig[i] == 1:
                 sl = entry - float(atr[i]) * sl_mult
                 tp = entry + (entry - sl) * rr
                 direction = "BUY"
-            else:             # SELL
+            else:
                 sl = entry + float(atr[i]) * sl_mult
                 tp = entry - (sl - entry) * rr
                 direction = "SELL"
@@ -183,60 +234,139 @@ def _simulate(df: pd.DataFrame, cfg: BacktestConfig, ts_fmt: str) -> dict:
             if risk_pts < 0.01:
                 continue
 
-            qty = max(1, int((equity * risk_frac) / risk_pts))
-            trade = {
-                "entry_time": ts[i + 1],
-                "signal":     direction,
-                "entry":      round(entry, 2),
-                "sl":         round(sl, 2),
-                "tp":         round(tp, 2),
-                "qty":        qty,
-                "_bar":       i + 1,   # removed before returning
-            }
+            if segment == "SPOT":
+                qty = max(1, int((equity * risk_frac) / risk_pts))
+                trade = {
+                    "entry_time": ts[i + 1], "signal": direction,
+                    "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2),
+                    "qty": qty, "_bar": i + 1,
+                }
+
+            elif segment == "FUTURES":
+                qty_lots = max(1, int((equity * risk_frac) / (risk_pts * lot_size)))
+                trade = {
+                    "entry_time": ts[i + 1], "signal": direction,
+                    "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2),
+                    "qty": qty_lots * lot_size, "_bar": i + 1,
+                    "_lots": qty_lots, "_lot_size": lot_size,
+                }
+
+            else:  # OPTIONS_CE / OPTIONS_PE
+                K = round(entry / strike_gap) * strike_gap
+                T_entry = cfg.option_dte / 365.0
+                if segment == "OPTIONS_CE":
+                    p_entry = _bs_call(entry, K, T_entry, sigma)
+                else:
+                    p_entry = _bs_put(entry, K, T_entry, sigma)
+                if p_entry < 0.01:
+                    continue
+                qty_lots = max(1, int((equity * risk_frac) / (p_entry * lot_size)))
+                trade = {
+                    "entry_time": ts[i + 1], "signal": direction,
+                    "entry": round(p_entry, 2),  # display option premium as "entry"
+                    "sl": round(sl, 2), "tp": round(tp, 2),
+                    "qty": qty_lots * lot_size, "_bar": i + 1,
+                    "_lots": qty_lots, "_lot_size": lot_size,
+                    "_K": K, "_T_entry": T_entry, "_p_entry": p_entry,
+                    "_spot_entry": entry,
+                }
 
         else:
             if i <= trade["_bar"]:
-                continue  # don't check exit on entry bar itself
+                continue
+
+            outcome = exit_px = None
 
             if trade["signal"] == "BUY":
                 if low[i] <= trade["sl"]:
-                    pnl, outcome, exit_px = (trade["sl"] - trade["entry"]) * trade["qty"], "LOSS", trade["sl"]
+                    exit_px, outcome = trade["sl"], "LOSS"
                 elif high[i] >= trade["tp"]:
-                    pnl, outcome, exit_px = (trade["tp"] - trade["entry"]) * trade["qty"], "WIN",  trade["tp"]
-                else:
-                    continue
+                    exit_px, outcome = trade["tp"], "WIN"
             else:
                 if high[i] >= trade["sl"]:
-                    pnl, outcome, exit_px = (trade["entry"] - trade["sl"]) * trade["qty"], "LOSS", trade["sl"]
+                    exit_px, outcome = trade["sl"], "LOSS"
                 elif low[i] <= trade["tp"]:
-                    pnl, outcome, exit_px = (trade["entry"] - trade["tp"]) * trade["qty"], "WIN",  trade["tp"]
+                    exit_px, outcome = trade["tp"], "WIN"
+
+            if outcome is None:
+                continue
+
+            if segment == "SPOT":
+                if trade["signal"] == "BUY":
+                    pnl = (exit_px - trade["entry"]) * trade["qty"]
                 else:
-                    continue
+                    pnl = (trade["entry"] - exit_px) * trade["qty"]
+                exit_display = round(float(exit_px), 2)
+
+            elif segment == "FUTURES":
+                if trade["signal"] == "BUY":
+                    pnl = (exit_px - float(opens[trade["_bar"]])) * trade["qty"]
+                else:
+                    pnl = (float(opens[trade["_bar"]]) - exit_px) * trade["qty"]
+                exit_display = round(float(exit_px), 2)
+
+            else:  # OPTIONS
+                bars_held = i - trade["_bar"]
+                days_held = bars_held / bars_per_day if bars_per_day > 0 else bars_held
+                T_exit = max((cfg.option_dte - days_held) / 365.0, 0.5 / 365.0)
+                K = trade["_K"]
+                if segment == "OPTIONS_CE":
+                    p_exit = _bs_call(float(exit_px), K, T_exit, sigma)
+                else:
+                    p_exit = _bs_put(float(exit_px), K, T_exit, sigma)
+                pnl = (p_exit - trade["_p_entry"]) * trade["qty"]
+                exit_display = round(p_exit, 2)
 
             equity += pnl
-            trade.update({"exit_time": ts[i], "exit": round(float(exit_px), 2),
-                          "pnl": round(float(pnl), 2), "outcome": outcome})
-            del trade["_bar"]
-            trades.append(trade)
+            t_out = {
+                "entry_time": trade["entry_time"], "exit_time": ts[i],
+                "signal": trade["signal"],
+                "entry": trade["entry"], "exit": exit_display,
+                "sl": trade["sl"], "tp": trade["tp"],
+                "qty": trade["qty"], "pnl": round(float(pnl), 2), "outcome": outcome,
+            }
+            trades.append(t_out)
             trade = None
 
-    # Force-close any trade still open at end of data
+    # Force-close open trade at end of data
     if trade is not None:
-        last = float(close[-1])
-        pnl = (last - trade["entry"]) * trade["qty"] if trade["signal"] == "BUY" \
-              else (trade["entry"] - last) * trade["qty"]
+        last_spot = float(close[-1])
+        if segment == "SPOT":
+            pnl = (last_spot - trade["entry"]) * trade["qty"] if trade["signal"] == "BUY" \
+                  else (trade["entry"] - last_spot) * trade["qty"]
+            exit_display = round(last_spot, 2)
+        elif segment == "FUTURES":
+            entry_spot = float(opens[trade["_bar"]])
+            pnl = (last_spot - entry_spot) * trade["qty"] if trade["signal"] == "BUY" \
+                  else (entry_spot - last_spot) * trade["qty"]
+            exit_display = round(last_spot, 2)
+        else:
+            K = trade["_K"]
+            T_exit = max(0.5 / 365.0, trade["_T_entry"] - (n - 1 - trade["_bar"]) / (bars_per_day * 365))
+            if segment == "OPTIONS_CE":
+                p_exit = _bs_call(last_spot, K, T_exit, sigma)
+            else:
+                p_exit = _bs_put(last_spot, K, T_exit, sigma)
+            pnl = (p_exit - trade["_p_entry"]) * trade["qty"]
+            exit_display = round(p_exit, 2)
+
         equity += pnl
         equity_curve[-1][1] = round(equity, 2)
-        trade.update({"exit_time": ts[-1], "exit": round(last, 2),
-                      "pnl": round(float(pnl), 2), "outcome": "OPEN"})
-        del trade["_bar"]
-        trades.append(trade)
+        trades.append({
+            "entry_time": trade["entry_time"], "exit_time": ts[-1],
+            "signal": trade["signal"],
+            "entry": trade["entry"], "exit": exit_display,
+            "sl": trade["sl"], "tp": trade["tp"],
+            "qty": trade["qty"], "pnl": round(float(pnl), 2), "outcome": "OPEN",
+        })
 
     return {
         "metrics":      _metrics(trades, equity_curve, cfg.initial_capital),
         "equity_curve": equity_curve,
         "trades":       trades,
         "data_range":   {"from": ts[0], "to": ts[-1], "bars": n},
+        "segment":      segment,
+        "lot_size":     lot_size if segment != "SPOT" else 1,
     }
 
 
@@ -252,32 +382,30 @@ def _metrics(trades: list, equity_curve: list, initial: float) -> dict:
     losses = [p for p in pnls if p < 0]
     net    = sum(pnls)
 
-    # Max drawdown from equity high-watermark
     peak, max_dd = initial, 0.0
     for _, eq in equity_curve:
-        peak  = max(peak, eq)
+        peak   = max(peak, eq)
         max_dd = max(max_dd, (peak - eq) / peak * 100)
 
-    # Trade-based Sharpe (annualised, no risk-free rate)
     series = pd.Series(pnls)
     sharpe = float((series.mean() / series.std()) * (252 ** 0.5)) if len(pnls) > 1 and series.std() > 0 else 0.0
 
-    avg_win  = sum(wins) / len(wins)   if wins   else 0.0
+    avg_win  = sum(wins) / len(wins)     if wins   else 0.0
     avg_loss = sum(losses) / len(losses) if losses else 0.0
 
     return {
-        "initial_capital":   initial,
-        "final_equity":      round(initial + net, 2),
-        "net_pnl":           round(net, 2),
-        "total_return_pct":  round(net / initial * 100, 2),
-        "total_trades":      len(closed),
-        "win_rate":          round(len(wins) / len(closed) * 100, 1),
-        "profit_factor":     round(sum(wins) / abs(sum(losses)), 2) if losses else 0.0,
-        "sharpe_ratio":      round(sharpe, 2),
-        "max_drawdown_pct":  round(max_dd, 2),
-        "avg_win":           round(avg_win, 2),
-        "avg_loss":          round(avg_loss, 2),
-        "avg_rr":            round(abs(avg_win / avg_loss), 2) if avg_loss else 0.0,
+        "initial_capital":  initial,
+        "final_equity":     round(initial + net, 2),
+        "net_pnl":          round(net, 2),
+        "total_return_pct": round(net / initial * 100, 2),
+        "total_trades":     len(closed),
+        "win_rate":         round(len(wins) / len(closed) * 100, 1),
+        "profit_factor":    round(sum(wins) / abs(sum(losses)), 2) if losses else 0.0,
+        "sharpe_ratio":     round(sharpe, 2),
+        "max_drawdown_pct": round(max_dd, 2),
+        "avg_win":          round(avg_win, 2),
+        "avg_loss":         round(avg_loss, 2),
+        "avg_rr":           round(abs(avg_win / avg_loss), 2) if avg_loss else 0.0,
     }
 
 
