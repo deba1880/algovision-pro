@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, Star, TrendingUp, TrendingDown } from 'lucide-react'
+import { Search, TrendingUp, TrendingDown } from 'lucide-react'
 import { useAppSelector, useAppDispatch } from '../../store/hooks'
 import { setSymbol } from '../../store/slices/chartSlice'
 import { clsx } from 'clsx'
@@ -28,17 +28,14 @@ export default function Sidebar() {
   const { quotes } = useAppSelector(s => s.market)
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<any[]>([])
-  const [searching, setSearching] = useState(false)
 
   const handleSearch = async (q: string) => {
     setQuery(q)
     if (q.length < 1) { setSearchResults([]); return }
-    setSearching(true)
     try {
       const res = await api.searchSymbols(q)
       setSearchResults(res.results || [])
     } catch { setSearchResults([]) }
-    finally { setSearching(false) }
   }
 
   const selectSymbol = (item: any) => {

@@ -26,6 +26,8 @@ import yfinance as yf
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.utils import LOT_SIZES as _LOT_SIZES, STRIKE_GAPS as _STRIKE_GAPS
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -40,13 +42,6 @@ _YF_INTERVAL = {
     "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "1d": "1d", "1w": "1wk",
 }
 _INTRADAY = {"5m", "15m", "30m", "1h"}
-
-_LOT_SIZES = {
-    "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75, "SENSEX": 20,
-}
-_STRIKE_GAPS = {
-    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25, "SENSEX": 100,
-}
 # Approximate bars-per-day for theta decay
 _BARS_PER_DAY = {
     "5m": 75, "15m": 25, "30m": 12, "1h": 6, "1d": 1, "1w": 0.2,

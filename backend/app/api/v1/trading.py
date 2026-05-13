@@ -65,7 +65,7 @@ async def _risk_check(order: OrderRequest, db: AsyncSession) -> tuple[bool, str]
     # 4. Daily loss check
     result = await db.execute(text("""
         SELECT COALESCE(SUM(pnl), 0) FROM positions
-        WHERE opened_at::date = CURRENT_DATE AND closed_at IS NOT NULL
+        WHERE DATE(opened_at) = CURRENT_DATE AND closed_at IS NOT NULL
           AND is_paper = :paper
     """), {"paper": settings.PAPER_TRADE_MODE})
     daily_pnl = float(result.scalar() or 0)
@@ -106,7 +106,7 @@ async def _place_paper_order(order: OrderRequest, db: AsyncSession) -> dict:
     exec_price = ltp if order.order_type == "MARKET" else order.price
 
     result = await db.execute(text("""
-        INSERT INTO orders (symbol, exchange, transaction, order_type, product,
+        INSERT INTO orders (symbol, exchange, "transaction", order_type, product,
                             quantity, price, status, avg_price, filled_qty,
                             is_paper, broker, signal_id)
         VALUES (:symbol, :exchange, :transaction, :order_type, :product,
@@ -175,7 +175,7 @@ async def _place_live_order(order: OrderRequest, db: AsyncSession) -> dict:
         )
         # Save to DB
         await db.execute(text("""
-            INSERT INTO orders (broker_order_id, symbol, exchange, transaction, order_type,
+            INSERT INTO orders (broker_order_id, symbol, exchange, "transaction", order_type,
                                 product, quantity, price, status, is_paper, broker, signal_id)
             VALUES (:broker_id, :symbol, :exchange, :transaction, :order_type,
                     :product, :quantity, :price, :status, FALSE, 'ANGEL', :signal_id)
@@ -232,7 +232,7 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
 @router.get("/orders")
 async def get_orders(limit: int = 50, db: AsyncSession = Depends(get_db)):
     result = await db.execute(text("""
-        SELECT id, broker_order_id, placed_at, symbol, exchange, transaction,
+        SELECT id, broker_order_id, placed_at, symbol, exchange, "transaction",
                order_type, product, quantity, price, status, avg_price, filled_qty,
                is_paper, broker
         FROM orders

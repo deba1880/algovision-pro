@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from app.core.config import settings
 from app.core.database import init_db, get_redis
-from app.api.v1 import market, trading, backtest, alerts as alerts_api
+from app.api.v1 import market, trading, backtest, alerts as alerts_api, robot as robot_api
 from app.websocket.manager import ws_manager
 from app.data.tick_pipeline import start_feed
 
@@ -45,6 +45,9 @@ async def lifespan(app: FastAPI):
     # Seed market events from NSE corporate announcements (on startup + every 6h)
     asyncio.create_task(_seed_market_events())
 
+    # Robot heartbeat — broadcast status every 30s
+    asyncio.create_task(_robot_heartbeat())
+
     yield
 
     logger.info("AlgoVision Pro shutting down")
@@ -71,10 +74,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
 
-app.include_router(market.router,   prefix="/api/v1/market",   tags=["Market Data"])
-app.include_router(trading.router,  prefix="/api/v1/trading",  tags=["Trading"])
-app.include_router(backtest.router,    prefix="/api/v1/backtest", tags=["Backtesting"])
-app.include_router(alerts_api.router,  prefix="/api/v1/alerts",   tags=["Alerts"])
+app.include_router(market.router,     prefix="/api/v1/market",   tags=["Market Data"])
+app.include_router(trading.router,    prefix="/api/v1/trading",  tags=["Trading"])
+app.include_router(backtest.router,   prefix="/api/v1/backtest", tags=["Backtesting"])
+app.include_router(alerts_api.router, prefix="/api/v1/alerts",   tags=["Alerts"])
+app.include_router(robot_api.router,  prefix="/api/v1/robot",    tags=["Robot"])
 
 
 # ─── WebSocket Endpoints ──────────────────────────────────────────────────────
@@ -434,3 +438,20 @@ async def _seed_market_events():
             logger.error("Event seeder error: %s", e)
 
         await asyncio.sleep(6 * 3600)  # re-seed every 6 hours
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _robot_heartbeat():
+    """Broadcast robot status to market WS channel every 30s."""
+    from app.ai.robot.engine import get_status
+    while True:
+        try:
+            status = get_status()
+            await ws_manager.broadcast("market", {
+                "type": "robot_status",
+                "data": status,
+            })
+        except Exception as e:
+            logger.error("Robot heartbeat error: %s", e)
+        await asyncio.sleep(30)

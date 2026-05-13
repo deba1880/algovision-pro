@@ -48,6 +48,11 @@ export const api = {
   getOrders: () =>
     http.get('/trading/orders').then(r => r.data),
 
+  // Options LTP (served from cache)
+  getOptionLtp: (underlying: string, strike: number, optionType: string, expiry: string) =>
+    http.get(`/market/option-ltp/${underlying}?strike=${strike}&option_type=${optionType}&expiry=${encodeURIComponent(expiry)}`)
+      .then(r => r.data),
+
   // Backtesting
   runBacktest: (config: any) =>
     http.post('/backtest/run', config, { timeout: 90_000 }).then(r => r.data),
@@ -58,6 +63,20 @@ export const api = {
 
   sendTestAlert: () =>
     http.post('/alerts/test').then(r => r.data),
+
+  // Robot
+  getRobotConfig: () =>
+    http.get('/robot/config').then(r => r.data),
+  updateRobotConfig: (config: any) =>
+    http.put('/robot/config', config).then(r => r.data),
+  startRobot: () =>
+    http.post('/robot/start').then(r => r.data),
+  stopRobot: () =>
+    http.post('/robot/stop').then(r => r.data),
+  getRobotStatus: () =>
+    http.get('/robot/status').then(r => r.data),
+  getRobotTrades: (status?: string, limit = 50) =>
+    http.get(`/robot/trades?${status ? `status=${status}&` : ''}limit=${limit}`).then(r => r.data),
 
   // Health
   health: () =>

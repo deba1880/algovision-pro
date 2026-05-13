@@ -11,6 +11,7 @@ import TradingPage from './pages/TradingPage'
 import BacktestPage from './pages/BacktestPage'
 import EventsPage from './pages/EventsPage'
 import SettingsPage from './pages/SettingsPage'
+import RobotPage from './pages/RobotPage'
 
 export default function App() {
   const dispatch = useAppDispatch()
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="backtest" element={<BacktestPage />} />
           <Route path="events" element={<EventsPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="robot" element={<RobotPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

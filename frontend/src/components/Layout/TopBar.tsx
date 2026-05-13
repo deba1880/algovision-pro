@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { Activity, BarChart2, Zap, ShoppingCart, FlaskConical, Calendar, Settings, Wifi, WifiOff, LayoutDashboard, Menu, X } from 'lucide-react'
+import { Activity, BarChart2, Zap, ShoppingCart, FlaskConical, Calendar, Settings, Wifi, WifiOff, LayoutDashboard, Menu, X, Bot } from 'lucide-react'
 import { useAppSelector } from '../../store/hooks'
 import { clsx } from 'clsx'
 
@@ -12,6 +12,7 @@ const NAV = [
   { to: '/trading',   label: 'Trading',      icon: ShoppingCart },
   { to: '/backtest',  label: 'Backtest',     icon: FlaskConical },
   { to: '/events',    label: 'Events',       icon: Calendar     },
+  { to: '/robot',     label: 'Robot',        icon: Bot          },
   { to: '/settings',  label: 'Settings',     icon: Settings     },
 ]
 

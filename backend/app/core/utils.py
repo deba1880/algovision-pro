@@ -22,6 +22,14 @@ SEGMENT_BY_EXCHANGE: dict[str, str] = {
     "BFO": "FNO",
 }
 
+LOT_SIZES: dict[str, int] = {
+    "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75, "SENSEX": 20,
+}
+
+STRIKE_GAPS: dict[str, int] = {
+    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25, "SENSEX": 100,
+}
+
 # Canonical timeframe → seconds mapping used across market.py and signal generation
 TIMEFRAME_SECONDS: dict[str, int] = {
     "1m":  60,    "3m":  180,  "5m":  300,  "10m": 600,

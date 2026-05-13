@@ -196,6 +196,43 @@ async def get_options_chain(symbol: str, redis=Depends(get_redis)):
     return {"source": "live", "data": data}
 
 
+# ─── Option LTP (served from cache) ──────────────────────────────────────────
+
+@router.get("/option-ltp/{underlying}")
+async def get_option_ltp(
+    underlying: str,
+    strike: float = Query(...),
+    option_type: str = Query(...),   # CE or PE
+    expiry: str = Query(...),
+    redis=Depends(get_redis),
+):
+    """Return current LTP for a specific option contract from the options chain cache."""
+    cache_key = f"options_chain:{underlying.upper()}"
+    cached = await redis.get(cache_key)
+    if not cached:
+        raise HTTPException(status_code=503, detail="Options chain cache is empty. Backend may not have warmed up yet.")
+
+    chain = json.loads(cached)
+    ot = option_type.upper()
+    for row in chain.get("data", []):
+        if abs(row["strike"] - strike) < 0.01 and row.get("expiry") == expiry:
+            side = row.get(ot, {})
+            ltp = side.get("ltp")
+            if ltp is None:
+                raise HTTPException(status_code=404, detail=f"No LTP for {underlying} {strike} {ot} {expiry}")
+            return {
+                "underlying": underlying.upper(),
+                "strike": strike,
+                "option_type": ot,
+                "expiry": expiry,
+                "ltp": ltp,
+                "oi": side.get("oi", 0),
+                "iv": side.get("iv", 0),
+                "timestamp": chain.get("timestamp", ""),
+            }
+    raise HTTPException(status_code=404, detail=f"Strike {strike} {ot} not found in chain for {underlying}")
+
+
 # ─── Indices ──────────────────────────────────────────────────────────────────
 
 @router.get("/indices")

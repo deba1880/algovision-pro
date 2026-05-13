@@ -12,7 +12,7 @@ import {
   LineSeries,
   HistogramSeries,
 } from 'lightweight-charts'
-import { useAppSelector, useAppDispatch } from '../../store/hooks'
+import { useAppSelector } from '../../store/hooks'
 import { api } from '../../services/api'
 import { connectTickWebSocket } from '../../services/websocket'
 
@@ -33,15 +33,6 @@ const CHART_COLORS = {
   vwap:        '#bc8cff',
 }
 
-interface SMCZone {
-  zone_type: string
-  price_top: number
-  price_bottom: number
-  candle_time: string
-  strength: number
-  description: string
-}
-
 interface ChartProps {
   height?: number
 }
@@ -55,11 +46,9 @@ export default function TradingChart({ height = 600 }: ChartProps) {
   const ema50Ref  = useRef<ISeriesApi<'Line'> | null>(null)
   const ema200Ref = useRef<ISeriesApi<'Line'> | null>(null)
   const vwapRef   = useRef<ISeriesApi<'Line'> | null>(null)
-  const smcBoxRefs = useRef<any[]>([])
   const wsCleanup = useRef<(() => void) | null>(null)
 
-  const { activeSymbol, timeframe, indicators, showSMCZones, showSignals } = useAppSelector(s => s.chart)
-  const dispatch = useAppDispatch()
+  const { activeSymbol, timeframe, indicators, showSMCZones } = useAppSelector(s => s.chart)
 
   // ─── Initialize Chart ────────────────────────────────────────────────────────
   useEffect(() => {

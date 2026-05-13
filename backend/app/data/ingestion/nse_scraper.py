@@ -1,23 +1,19 @@
 """
 NSE India data scraper.
-Fetches: options chain, FII/DII, indices, market breadth, corporate actions,
-         F&O bhavcopy, delivery data.
+Fetches: options chain, FII/DII, indices, market breadth, corporate actions.
 
-Uses nsepython library + direct NSE API calls (public endpoints, no auth needed).
-NSE rate-limits aggressively — all requests go through a throttled session with
-proper headers mimicking a browser request.
+Uses requests.Session (sync) via asyncio executor — more reliable than httpx
+for NSE's cookie-based session management. NSE rate-limits aggressively;
+all requests include proper browser headers and a session warmup sequence.
 """
 
 import asyncio
 import logging
+import threading
 import time
-from datetime import datetime, date
-from typing import Dict, List, Optional
-import httpx
-try:
-    from nsepython import nse_optionchain_scrapper, nse_eq, nse_fno, nse_index, fnolist
-except ImportError:
-    nse_optionchain_scrapper = nse_eq = nse_fno = nse_index = fnolist = None
+from datetime import datetime
+from typing import List, Optional
+import requests
 
 from app.core.utils import IST
 
@@ -37,10 +33,11 @@ def _to_int(val, default: int = 0) -> int:
     except (ValueError, TypeError):
         return default
 
+
 NSE_BASE = "https://www.nseindia.com"
 NSE_API  = "https://www.nseindia.com/api"
 
-# Proper headers required — NSE blocks requests without these
+# No 'br' — requests doesn't decode Brotli without brotlicffi installed
 NSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -49,171 +46,225 @@ NSE_HEADERS = {
     ),
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.nseindia.com/",
     "Connection": "keep-alive",
 }
 
-_last_request_time: float = 0
-_MIN_REQUEST_INTERVAL = 0.5  # 500ms between NSE requests
+
+class _SyncNSESession:
+    """
+    Thread-safe wrapper around requests.Session for NSE API calls.
+    All operations are serialized through a single lock — NSE rate-limits
+    aggressively, and requests.Session is not safe for concurrent access.
+    """
+
+    def __init__(self):
+        self._session: Optional[requests.Session] = None
+        self._lock = threading.Lock()
+        self._options_warmed = False
+
+    # Headers for page visits (different Accept from API calls)
+    _PAGE_HEADERS = {
+        **NSE_HEADERS,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+    def _make_session(self) -> requests.Session:
+        s = requests.Session()
+        s.headers.update(NSE_HEADERS)
+        return s
+
+    # Headers for options API calls — simulates XHR from the option-chain page
+    _OC_API_HEADERS = {
+        **NSE_HEADERS,
+        "Referer": "https://www.nseindia.com/option-chain",
+        "X-Requested-With": "XMLHttpRequest",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+    # Pages to try for warmup. nsit is set by NSE's backend servers (load-balancer
+    # dependent — not every request sets it). We try multiple URLs and retry until
+    # nsit appears in the session cookies.
+    _WARMUP_URLS = [
+        f"{NSE_BASE}/market-data/equity-derivatives-watch",
+        f"{NSE_BASE}/get-quotes/derivatives?symbol=NIFTY",
+        f"{NSE_BASE}/get-quotes/equity?symbol=NIFTY",
+        f"{NSE_BASE}/market-data/live-equity-market",
+        f"{NSE_BASE}/option-chain",
+    ]
+
+    def _warmup(self, session: requests.Session) -> bool:
+        """Attempt to warm up session and obtain nsit cookie. Returns True if nsit set."""
+        for url in self._WARMUP_URLS:
+            try:
+                r = session.get(url, headers=self._PAGE_HEADERS, timeout=10)
+                cookies = list(session.cookies.keys())
+                logger.info("NSE warmup [%s] → %d  cookies=%s",
+                            url.split("/")[-1] or "home", r.status_code, cookies)
+                if r.status_code == 200:
+                    if "nsit" in session.cookies:
+                        logger.info("Got nsit cookie on first warmup attempt")
+                        return True
+                    time.sleep(0.5)
+            except Exception as e:
+                logger.warning("NSE warmup failed [%s]: %s", url, e)
+        return "nsit" in session.cookies
+
+    def _ensure_session(self) -> requests.Session:
+        # Must be called while holding self._lock
+        if self._session is None:
+            # NSE's nsit cookie is load-balancer dependent — retry with fresh sessions
+            # until we get it (max 3 attempts, each ≤ 3 pages × 10s = ~30s worst case)
+            for attempt in range(3):
+                session = self._make_session()
+                has_nsit = self._warmup(session)
+                if has_nsit:
+                    self._session = session
+                    break
+                logger.info("nsit not obtained (attempt %d/3), retrying with fresh session", attempt + 1)
+                time.sleep(1.5)
+            else:
+                # Proceed with whatever cookies we have — may still work for non-OC calls
+                self._session = session
+                logger.warning("Could not obtain nsit after 3 warmup attempts")
+
+            self._options_warmed = True
+            logger.info("NSE session ready. Final cookies: %s",
+                        list(self._session.cookies.keys()))
+        return self._session
+
+    def reset(self):
+        with self._lock:
+            self._session = None
+            self._options_warmed = False
+
+    def warmup_for_options(self):
+        with self._lock:
+            if self._options_warmed:
+                return
+            self._ensure_session()  # _ensure_session now handles options warmup
+
+    def get(self, endpoint: str) -> Optional[dict]:
+        # Full lock — requests.Session is not thread-safe; serialize all calls
+        with self._lock:
+            session = self._ensure_session()
+            try:
+                # Use options-chain referer/XHR headers for the OC endpoints
+                headers = (
+                    self._OC_API_HEADERS
+                    if "option-chain" in endpoint
+                    else None
+                )
+                resp = session.get(f"{NSE_API}{endpoint}", headers=headers, timeout=10)
+                body_len = len(resp.content)
+                logger.info("NSE API %s → %d  len=%d  cookies=%s",
+                            endpoint, resp.status_code, body_len,
+                            list(session.cookies.keys()))
+                if resp.status_code == 200:
+                    if body_len < 50:
+                        logger.warning("NSE tiny body [%s]: %r", endpoint, resp.text)
+                        return None
+                    try:
+                        return resp.json()
+                    except Exception as je:
+                        logger.error("NSE JSON parse error [%s]: %s | body[:200]=%r",
+                                     endpoint, je, resp.text[:200])
+                        return None
+                if resp.status_code in (401, 403):
+                    self._session = None
+                    self._options_warmed = False
+                return None
+            except Exception as e:
+                logger.error("NSE request failed [%s]: %s", endpoint, e)
+                return None
 
 
 class NSEScraper:
-    """Async NSE data fetcher with session management and rate limiting."""
+    """Async NSE data fetcher — wraps _SyncNSESession in asyncio executor."""
 
     def __init__(self):
-        self._client: Optional[httpx.AsyncClient] = None
-        self._options_warmed: bool = False
-
-    async def _reset_session(self):
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-        self._client = None
-        self._options_warmed = False
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                headers=NSE_HEADERS,
-                timeout=20.0,
-                follow_redirects=True,
-                http2=False,
-            )
-            self._options_warmed = False
-            # Homepage hit — sets nsit / nseappid cookies
-            try:
-                await self._client.get(NSE_BASE)
-                await asyncio.sleep(0.8)
-            except Exception as e:
-                logger.warning("NSE homepage warmup failed: %s", e)
-        return self._client
-
-    async def _warmup_options_session(self):
-        """NSE requires visiting the F&O page before the options-chain API works."""
-        if self._options_warmed:
-            return
-        client = await self._get_client()
-        try:
-            await client.get(
-                f"{NSE_BASE}/market-data/equity-derivatives-watch",
-                headers={**NSE_HEADERS, "Referer": NSE_BASE + "/"},
-            )
-            await asyncio.sleep(1.0)
-            self._options_warmed = True
-        except Exception as e:
-            logger.warning("NSE options session warmup failed: %s", e)
+        self._nse = _SyncNSESession()
 
     async def _get(self, endpoint: str) -> Optional[dict]:
-        """Rate-limited GET against NSE API."""
-        global _last_request_time
-        elapsed = time.monotonic() - _last_request_time
-        if elapsed < _MIN_REQUEST_INTERVAL:
-            await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
-
-        client = await self._get_client()
-        try:
-            resp = await client.get(
-                f"{NSE_API}{endpoint}",
-                headers={**NSE_HEADERS, "Referer": f"{NSE_BASE}/"},
-            )
-            _last_request_time = time.monotonic()
-            if resp.status_code == 200:
-                try:
-                    return resp.json()
-                except Exception:
-                    import json
-                    return json.loads(resp.text)
-            elif resp.status_code in (401, 403):
-                # Session expired — force re-init on next call
-                await self._reset_session()
-            logger.warning("NSE API returned %s for %s", resp.status_code, endpoint)
-            return None
-        except Exception as e:
-            logger.error("NSE request failed [%s]: %s", endpoint, e)
-            return None
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._nse.get, endpoint)
 
     # ─── Options Chain ─────────────────────────────────────────────────────────
 
     async def get_options_chain(self, symbol: str = "NIFTY") -> Optional[dict]:
         """
-        Fetch full options chain for index or stock.
-        symbol: NIFTY, BANKNIFTY, FINNIFTY, or stock symbol
-        Retries once with a fresh session if the first attempt fails.
+        Fetch full options chain. Retries once with a fresh session on failure.
+        symbol: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, or equity symbol.
         """
-        endpoint = f"/option-chain-indices?symbol={symbol}" \
-                   if symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY") \
-                   else f"/option-chain-equities?symbol={symbol}"
+        endpoint = (
+            f"/option-chain-indices?symbol={symbol}"
+            if symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+            else f"/option-chain-equities?symbol={symbol}"
+        )
 
+        loop = asyncio.get_event_loop()
         for attempt in range(2):
             if attempt > 0:
                 logger.info("Retrying options chain for %s (resetting session)", symbol)
-                await self._reset_session()
+                await loop.run_in_executor(None, self._nse.reset)
                 await asyncio.sleep(2.0)
 
-            await self._warmup_options_session()
+            await loop.run_in_executor(None, self._nse.warmup_for_options)
             data = await self._get(endpoint)
-            if data:
+            if data and data.get("records"):
                 return self._parse_options_chain(data, symbol)
 
-        logger.warning("Options chain fetch failed for %s after 2 attempts", symbol)
+        logger.warning("Options chain unavailable for %s after 2 attempts", symbol)
         return None
 
     def _parse_options_chain(self, raw: dict, symbol: str) -> dict:
-        """Normalize NSE options chain response."""
         records = raw.get("records", {})
-        data = records.get("data", [])
+        rows_raw = records.get("data", [])
         expiry_dates = records.get("expiryDates", [])
         underlying_value = records.get("underlyingValue", 0)
 
         parsed_rows = []
-        for row in data:
-            expiry = row.get("expiryDate", "")
-            strike = row.get("strikePrice", 0)
+        for row in rows_raw:
             ce = row.get("CE", {})
             pe = row.get("PE", {})
             parsed_rows.append({
-                "expiry": expiry,
-                "strike": strike,
+                "expiry": row.get("expiryDate", ""),
+                "strike": row.get("strikePrice", 0),
                 "CE": {
-                    "ltp": ce.get("lastPrice", 0),
-                    "oi": ce.get("openInterest", 0),
+                    "ltp":       ce.get("lastPrice", 0),
+                    "oi":        ce.get("openInterest", 0),
                     "oi_change": ce.get("changeinOpenInterest", 0),
-                    "volume": ce.get("totalTradedVolume", 0),
-                    "iv": ce.get("impliedVolatility", 0),
-                    "bid": ce.get("bidprice", 0),
-                    "ask": ce.get("askPrice", 0),
-                    "delta": ce.get("delta", 0),
-                    "theta": ce.get("theta", 0),
-                    "gamma": ce.get("gamma", 0),
-                    "vega": ce.get("vega", 0),
+                    "volume":    ce.get("totalTradedVolume", 0),
+                    "iv":        ce.get("impliedVolatility", 0),
+                    "delta":     ce.get("delta", 0),
                 },
                 "PE": {
-                    "ltp": pe.get("lastPrice", 0),
-                    "oi": pe.get("openInterest", 0),
+                    "ltp":       pe.get("lastPrice", 0),
+                    "oi":        pe.get("openInterest", 0),
                     "oi_change": pe.get("changeinOpenInterest", 0),
-                    "volume": pe.get("totalTradedVolume", 0),
-                    "iv": pe.get("impliedVolatility", 0),
-                    "bid": pe.get("bidprice", 0),
-                    "ask": pe.get("askPrice", 0),
-                    "delta": pe.get("delta", 0),
-                    "theta": pe.get("theta", 0),
-                    "gamma": pe.get("gamma", 0),
-                    "vega": pe.get("vega", 0),
+                    "volume":    pe.get("totalTradedVolume", 0),
+                    "iv":        pe.get("impliedVolatility", 0),
+                    "delta":     pe.get("delta", 0),
                 },
             })
 
-        # Calculate PCR and Max Pain
         total_ce_oi = sum(r["CE"]["oi"] for r in parsed_rows)
         total_pe_oi = sum(r["PE"]["oi"] for r in parsed_rows)
         pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi else 0
-        max_pain = self._calc_max_pain(parsed_rows, underlying_value)
 
         return {
             "symbol": symbol,
             "underlying": underlying_value,
             "expiry_dates": expiry_dates,
             "pcr": pcr,
-            "max_pain": max_pain,
+            "max_pain": self._calc_max_pain(parsed_rows, underlying_value),
             "total_ce_oi": total_ce_oi,
             "total_pe_oi": total_pe_oi,
             "data": parsed_rows,
@@ -221,37 +272,27 @@ class NSEScraper:
         }
 
     def _calc_max_pain(self, rows: list, spot: float) -> float:
-        """
-        Max Pain = strike where total option buyer loss is maximum
-        (i.e., where the option seller/writer profits most).
-        """
         strikes = sorted(set(r["strike"] for r in rows))
         if not strikes:
             return spot
-
-        pain = {}
         row_map = {r["strike"]: r for r in rows}
+        pain = {}
         for test_strike in strikes:
             total_loss = 0
             for strike, row in row_map.items():
-                # CE writer profit when spot < strike (CE expires worthless)
                 if test_strike < strike:
                     total_loss += row["CE"]["oi"] * (strike - test_strike)
-                # PE writer profit when spot > strike (PE expires worthless)
                 if test_strike > strike:
                     total_loss += row["PE"]["oi"] * (test_strike - strike)
             pain[test_strike] = total_loss
-
         return min(pain, key=pain.get)
 
     # ─── Market Breadth ────────────────────────────────────────────────────────
 
     async def get_market_breadth(self) -> Optional[dict]:
-        """Advance/Decline for NSE."""
         data = await self._get("/market-data-pre-open?key=ALL")
         if not data:
             return None
-
         pre_open = data.get("data", [])
         advances = sum(1 for s in pre_open if _to_float(s.get("metadata", {}).get("change", 0)) > 0)
         declines  = sum(1 for s in pre_open if _to_float(s.get("metadata", {}).get("change", 0)) < 0)
@@ -266,7 +307,6 @@ class NSEScraper:
         }
 
     async def get_nifty50_stocks(self) -> List[dict]:
-        """All Nifty 50 stocks with current quote."""
         data = await self._get("/equity-stockIndices?index=NIFTY%2050")
         if not data:
             return []
@@ -282,7 +322,6 @@ class NSEScraper:
         ]
 
     async def get_indices(self) -> List[dict]:
-        """All NSE indices."""
         data = await self._get("/allIndices")
         if not data:
             return []
@@ -306,12 +345,11 @@ class NSEScraper:
     # ─── FII / DII Data ────────────────────────────────────────────────────────
 
     async def get_fii_dii(self) -> Optional[dict]:
-        """FII/DII net buy/sell for today."""
         data = await self._get("/fiidiiTradeReact")
         if not data:
             return None
         rows = data if isinstance(data, list) else data.get("data", [])
-        result = {"timestamp": datetime.now(IST).isoformat()}
+        result: dict = {"timestamp": datetime.now(IST).isoformat()}
         for row in rows:
             cat = row.get("category", "")
             if "FII" in cat or "FPI" in cat:
@@ -327,7 +365,6 @@ class NSEScraper:
     # ─── Corporate Events ──────────────────────────────────────────────────────
 
     async def get_corporate_actions(self, symbol: str = "") -> List[dict]:
-        """Dividends, splits, bonuses, rights."""
         endpoint = f"/corporateActions?index=equities&symbol={symbol}&from_date=&to_date=&csv=false"
         data = await self._get(endpoint)
         if not data:
@@ -335,7 +372,6 @@ class NSEScraper:
         return data if isinstance(data, list) else []
 
     async def get_earnings_calendar(self) -> List[dict]:
-        """Upcoming results announcements."""
         data = await self._get("/corporate-announcements?index=equities&type=Result")
         if not data:
             return []
@@ -344,5 +380,4 @@ class NSEScraper:
         return [d for d in (data.get("data") or [])[:50] if isinstance(d, dict)]
 
     async def close(self):
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
+        pass  # requests.Session has no async close
